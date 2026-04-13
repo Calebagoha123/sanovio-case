@@ -145,6 +145,4 @@ V1 intentionally does not include:
 - auth / multi-user tenancy
 - inventory visibility
 - cross-session memory
-- production-grade scaling and benchmarking
 
-Those are the next-step topics for V2 and for the follow-up systems design discussion.
