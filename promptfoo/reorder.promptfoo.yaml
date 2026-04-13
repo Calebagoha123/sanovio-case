@@ -1,0 +1,253 @@
+description: Reorder agent workflow evals
+
+providers:
+  - file://providers/reorder-agent.provider.ts
+
+prompts:
+  - file://prompts/agent-baseline.md
+  - file://prompts/agent-tight.md
+
+defaultTest:
+  vars:
+    timezone: Europe/London
+    currentDate: "2026-04-13"
+    catalogDataset: sample
+
+tests:
+  - description: order-start collects delivery metadata without repeating product details
+    vars:
+      input: Start a reorder request for internal ID 3.
+      history: []
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: false
+          mustExcludeArtifactTypes:
+            - product_details
+          requireNoToolErrors: true
+          forbidMarkdownTables: true
+          maxToolCalls: 2
+          textMustContainAny:
+            - delivery location
+            - deliver
+            - ward
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          textMustContainAny:
+            - cost center
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          textMustContainAny:
+            - requested-by date
+            - requested by date
+            - need it by
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          textMustContainAny:
+            - quantity
+            - how many
+      - type: latency
+        threshold: 20000
+
+  - description: delivery metadata transitions directly into approval state
+    vars:
+      input: Ward 3B, cost center CC-4412, tomorrow, 5 packs.
+      history:
+        - role: user
+          content: Start a reorder request for internal ID 3.
+        - role: assistant
+          content: To complete the reorder request, I need the delivery location, cost center, requested-by date, and quantity.
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: true
+          pendingToolName: createReorderRequest
+          pendingPreviewType: create_reorder_request
+          requirePendingCreatedAt: true
+          requirePendingExpiresAt: true
+          mustExcludeArtifactTypes:
+            - product_details
+          requireNoToolErrors: true
+          maxToolCalls: 2
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          textMustContainAny:
+            - Create reorder request
+            - Product:
+      - type: latency
+        threshold: 20000
+
+  - description: specific nitrile search uses catalog search and returns search artifacts
+    vars:
+      input: Find nitrile gloves.
+      history: []
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: false
+          mustIncludeToolCalls:
+            - searchCatalog
+          mustIncludeArtifactTypes:
+            - search_results
+          requireNoToolErrors: true
+          forbidMarkdownTables: true
+          textMustContainAny:
+            - nitrile
+            - nitril
+            - handschuh
+          textMustNotContainAny:
+            - "| # |"
+            - "|---|"
+      - type: latency
+        threshold: 20000
+
+  - description: german query stays in german and returns search results
+    vars:
+      input: Suche nach Nitrilhandschuhen.
+      history: []
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: false
+          mustIncludeToolCalls:
+            - searchCatalog
+          mustIncludeArtifactTypes:
+            - search_results
+          requireNoToolErrors: true
+          forbidMarkdownTables: true
+          textMustContainAny:
+            - gefunden
+            - artikel
+            - produkt
+            - handschuh
+            - nitril
+      - type: latency
+        threshold: 20000
+
+  - description: ambiguous query returns search help rather than a guessed write
+    vars:
+      input: I need gloves.
+      history: []
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: false
+          mustExcludeToolCalls:
+            - createReorderRequest
+            - createBasketReorderRequest
+          requireNoToolErrors: true
+          forbidMarkdownTables: true
+          textMustContainAny:
+            - glove
+            - nitrile
+            - latex
+            - clarify
+            - which
+            - type
+      - type: latency
+        threshold: 20000
+
+  - description: out-of-stock question stays within scope and does not claim stock visibility
+    vars:
+      input: Can you order an out-of-stock syringe for me?
+      history: []
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: false
+          mustExcludeToolCalls:
+            - createReorderRequest
+            - createBasketReorderRequest
+          forbidMarkdownTables: true
+          textMustMatchAnyRegex:
+            - "cannot .*stock"
+            - "can't .*stock"
+            - "no stock visibility"
+            - "doesn.t have stock visibility"
+            - "cannot see stock levels"
+            - "can.t confirm whether .* out of stock"
+      - type: latency
+        threshold: 20000
+
+  - description: nonexistent identifier does not create an approval
+    vars:
+      input: Please order product 999999 for Ward 3B.
+      history: []
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: false
+          mustExcludeToolCalls:
+            - createReorderRequest
+            - createBasketReorderRequest
+          forbidMarkdownTables: true
+          textMustContainAny:
+            - not found
+            - couldn't find
+            - cannot find
+            - search
+      - type: latency
+        threshold: 20000
+
+  - description: order follow-up after details does not emit product details again
+    vars:
+      input: Order 5 packs for Ward 3B, cost center CC-4412, tomorrow.
+      history:
+        - role: user
+          content: Show me the details for internal ID 3.
+        - role: assistant
+          content: Product 3 is Hartmann Molicare skin cleansing foam. Tell me if you want to order it.
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: true
+          pendingToolName: createReorderRequest
+          pendingPreviewType: create_reorder_request
+          requirePendingCreatedAt: true
+          requirePendingExpiresAt: true
+          mustExcludeArtifactTypes:
+            - product_details
+          requireNoToolErrors: true
+          maxToolCalls: 2
+      - type: latency
+        threshold: 20000
+
+  - description: broad catalog request does not dump exhaustive results
+    vars:
+      catalogDataset: synthetic100
+      input: Show me the full product catalog.
+      history: []
+    assert:
+      - type: javascript
+        value: file://assertions/check-agent-turn.ts
+        config:
+          requiresApproval: false
+          mustExcludeToolCalls:
+            - createReorderRequest
+            - createBasketReorderRequest
+          mustExcludeArtifactTypes:
+            - product_details
+          requireNoToolErrors: true
+          forbidMarkdownTables: true
+          textMustContainAny:
+            - refine
+            - narrow
+            - specific
+            - category
+            - what kind
+            - product type
+            - keyword
+      - type: latency
+        threshold: 20000

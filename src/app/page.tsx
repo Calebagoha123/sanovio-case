@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ModelMessage } from "ai";
 import styles from "./page.module.css";
-import type { ChatRequest, ChatStreamEvent } from "./api/chat/route";
+import type { ChatRequest, ChatStreamEvent } from "@/lib/chat/api-contract";
 import type {
   AgentUiArtifact,
   PendingApprovalPayload,
@@ -11,6 +11,11 @@ import type {
   ReorderRequestsArtifact,
   SearchResultsArtifact,
 } from "@/lib/chat/ui-contract";
+import {
+  groupArtifactsForRender,
+  type RenderArtifactGroup,
+} from "@/lib/chat/render-groups";
+import { getOrCreateSessionId } from "@/lib/chat/session-id";
 
 interface Message {
   id: string;
@@ -33,13 +38,13 @@ const STARTER_PROMPTS = [
 const CAPABILITIES = [
   "Search the catalog in natural language",
   "Show pack size, order unit, price, and product identifiers",
-  "Stage one reorder request at a time for confirmation",
+  "Stage single-item or multi-product basket requests for confirmation",
   "List and cancel requests created in this session",
 ];
 
 const LIMITATIONS = [
   "No stock visibility or live ERP access",
-  "One product per reorder request",
+  "Basket items must share delivery location, cost center, and date",
   "No actions without explicit confirmation",
   "No memory across sessions",
 ];
@@ -84,6 +89,146 @@ function formatCurrency(value: number | null, currency: string | null): string {
   }).format(value);
 }
 
+function ProductDetailsCard({ artifact }: { artifact: ProductDetailsArtifact }) {
+  const { product } = artifact;
+
+  return (
+    <section className={styles.artifactPanel}>
+      <div className={styles.artifactHeader}>
+        <div>
+          <div className={styles.artifactEyebrow}>Product details</div>
+          <h3 className={styles.artifactTitle}>{product.description}</h3>
+        </div>
+        <div className={styles.artifactMeta}>ID {product.internalId}</div>
+      </div>
+      <div className={styles.detailGrid}>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Brand</span>
+          <strong>{product.brand}</strong>
+        </div>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Order unit</span>
+          <strong>{product.orderUnit}</strong>
+        </div>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Pack conversion</span>
+          <strong>
+            1 {product.orderUnit} = {product.baseUnitsPerBme} {product.baseUnit}
+          </strong>
+        </div>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Unit price</span>
+          <strong>{formatCurrency(product.netTargetPrice, product.currency)}</strong>
+        </div>
+        {product.supplierArticleNo && (
+          <div className={styles.detailItem}>
+            <span className={styles.detailLabel}>Supplier article</span>
+            <strong>{product.supplierArticleNo}</strong>
+          </div>
+        )}
+        {product.gtinEan && (
+          <div className={styles.detailItem}>
+            <span className={styles.detailLabel}>GTIN / EAN</span>
+            <strong>{product.gtinEan}</strong>
+          </div>
+        )}
+        {product.mdrClass && (
+          <div className={styles.detailItem}>
+            <span className={styles.detailLabel}>MDR class</span>
+            <strong>{product.mdrClass}</strong>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ProductDetailsCarousel({
+  products,
+}: {
+  products: ProductDetailsArtifact[];
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const selected = products[selectedIndex] ?? products[0];
+
+  if (!selected) {
+    return null;
+  }
+
+  return (
+    <section className={styles.artifactPanel}>
+      <div className={styles.artifactHeader}>
+        <div>
+          <div className={styles.artifactEyebrow}>Product details</div>
+          <h3 className={styles.artifactTitle}>{selected.product.description}</h3>
+        </div>
+        <div className={styles.artifactMeta}>
+          {selectedIndex + 1} / {products.length}
+        </div>
+      </div>
+      <div className={styles.detailCarouselNav}>
+        <button
+          type="button"
+          className={styles.secondaryAction}
+          onClick={() => setSelectedIndex((prev) => (prev === 0 ? products.length - 1 : prev - 1))}
+          disabled={products.length < 2}
+        >
+          Previous
+        </button>
+        <div className={styles.detailCarouselMeta}>
+          ID {selected.product.internalId} • {selected.product.brand}
+        </div>
+        <button
+          type="button"
+          className={styles.secondaryAction}
+          onClick={() => setSelectedIndex((prev) => (prev + 1) % products.length)}
+          disabled={products.length < 2}
+        >
+          Next
+        </button>
+      </div>
+      <div className={styles.detailGrid}>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Brand</span>
+          <strong>{selected.product.brand}</strong>
+        </div>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Order unit</span>
+          <strong>{selected.product.orderUnit}</strong>
+        </div>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Pack conversion</span>
+          <strong>
+            1 {selected.product.orderUnit} = {selected.product.baseUnitsPerBme} {selected.product.baseUnit}
+          </strong>
+        </div>
+        <div className={styles.detailItem}>
+          <span className={styles.detailLabel}>Unit price</span>
+          <strong>{formatCurrency(selected.product.netTargetPrice, selected.product.currency)}</strong>
+        </div>
+        {selected.product.supplierArticleNo && (
+          <div className={styles.detailItem}>
+            <span className={styles.detailLabel}>Supplier article</span>
+            <strong>{selected.product.supplierArticleNo}</strong>
+          </div>
+        )}
+        {selected.product.gtinEan && (
+          <div className={styles.detailItem}>
+            <span className={styles.detailLabel}>GTIN / EAN</span>
+            <strong>{selected.product.gtinEan}</strong>
+          </div>
+        )}
+        {selected.product.mdrClass && (
+          <div className={styles.detailItem}>
+            <span className={styles.detailLabel}>MDR class</span>
+            <strong>{selected.product.mdrClass}</strong>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [history, setHistory] = useState<ModelMessage[]>([]);
@@ -93,7 +238,7 @@ export default function ChatPage() {
   const [pendingApproval, setPendingApproval] = useState<PendingApprovalPayload | null>(null);
   const [runtimeContext, setRuntimeContext] = useState<RuntimeContext | null>(null);
   const [selectedTimezone, setSelectedTimezone] = useState("Europe/Zurich");
-  const [sessionId] = useState(() => crypto.randomUUID());
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const chatRailRef = useRef<HTMLDivElement>(null);
   const hasMountedRef = useRef(false);
 
@@ -226,6 +371,10 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    setSessionId(getOrCreateSessionId(window.sessionStorage));
+  }, []);
+
+  useEffect(() => {
     if (!hasMountedRef.current) {
       hasMountedRef.current = true;
       return;
@@ -275,7 +424,7 @@ export default function ChatPage() {
   }
 
   async function sendMessage(message: string) {
-    if (!message.trim() || loading) return;
+    if (!message.trim() || loading || !sessionId) return;
 
     const isoDate = extractIsoDate(message);
     if (runtimeContext && isoDate && isoDate < runtimeContext.currentDate) {
@@ -314,13 +463,20 @@ export default function ChatPage() {
     }
   }
 
-  async function handleApproval(approved: boolean) {
-    if (!pendingApproval) return;
+  async function handleApproval(action: "confirm" | "cancel" | "edit") {
+    if (!pendingApproval || !sessionId) return;
     setLoading(true);
     setError(null);
 
-    if (!approved) {
-      appendAssistantMessage("Action cancelled. I can revise the request or help with another search.");
+    if (action === "cancel") {
+      appendAssistantMessage("Okay. I won't create that request.");
+      setPendingApproval(null);
+      setLoading(false);
+      return;
+    }
+
+    if (action === "edit") {
+      appendAssistantMessage("Tell me what to change about the request and I'll update the summary.");
       setPendingApproval(null);
       setLoading(false);
       return;
@@ -639,69 +795,17 @@ export default function ChatPage() {
   }
 
   function renderProductDetailsArtifact(artifact: ProductDetailsArtifact) {
-    const { product } = artifact;
+    return <ProductDetailsCard artifact={artifact} />;
+  }
 
-    return (
-      <section className={styles.artifactPanel}>
-        <div className={styles.artifactHeader}>
-          <div>
-            <div className={styles.artifactEyebrow}>Product details</div>
-            <h3 className={styles.artifactTitle}>{product.description}</h3>
-          </div>
-          <div className={styles.artifactMeta}>ID {product.internalId}</div>
-        </div>
-        <div className={styles.detailGrid}>
-          <div className={styles.detailItem}>
-            <span className={styles.detailLabel}>Brand</span>
-            <strong>{product.brand}</strong>
-          </div>
-          <div className={styles.detailItem}>
-            <span className={styles.detailLabel}>Order unit</span>
-            <strong>{product.orderUnit}</strong>
-          </div>
-          <div className={styles.detailItem}>
-            <span className={styles.detailLabel}>Pack conversion</span>
-            <strong>
-              1 {product.orderUnit} = {product.baseUnitsPerBme} {product.baseUnit}
-            </strong>
-          </div>
-          <div className={styles.detailItem}>
-            <span className={styles.detailLabel}>Unit price</span>
-            <strong>{formatCurrency(product.netTargetPrice, product.currency)}</strong>
-          </div>
-          {product.supplierArticleNo && (
-            <div className={styles.detailItem}>
-              <span className={styles.detailLabel}>Supplier article</span>
-              <strong>{product.supplierArticleNo}</strong>
-            </div>
-          )}
-          {product.gtinEan && (
-            <div className={styles.detailItem}>
-              <span className={styles.detailLabel}>GTIN / EAN</span>
-              <strong>{product.gtinEan}</strong>
-            </div>
-          )}
-          {product.mdrClass && (
-            <div className={styles.detailItem}>
-              <span className={styles.detailLabel}>MDR class</span>
-              <strong>{product.mdrClass}</strong>
-            </div>
-          )}
-        </div>
-        <div className={styles.inlineActions}>
-          <button
-            type="button"
-            className={styles.secondaryAction}
-            onClick={() =>
-              triggerStructuredAction(`Start a reorder request for internal ID ${product.internalId}.`)
-            }
-            disabled={loading}
-          >
-            Start reorder request
-          </button>
-        </div>
-      </section>
-    );
+  function renderProductDetailsGroup(
+    group: Extract<RenderArtifactGroup, { type: "product_details_group" }>
+  ) {
+    if (group.products.length === 1) {
+      return renderProductDetailsArtifact(group.products[0]);
+    }
+
+    return <ProductDetailsCarousel products={group.products} />;
   }
 
   function renderReorderRequestsArtifact(artifact: ReorderRequestsArtifact) {
@@ -728,6 +832,7 @@ export default function ChatPage() {
             <thead>
               <tr>
                 <th>Request ID</th>
+                <th>Basket ID</th>
                 <th>Product ID</th>
                 <th>Quantity</th>
                 <th>Delivery</th>
@@ -739,6 +844,7 @@ export default function ChatPage() {
               {artifact.requests.map((request) => (
                 <tr key={request.requestId}>
                   <td>{request.requestId}</td>
+                  <td>{request.basketId ?? "Single"}</td>
                   <td>{request.internalId}</td>
                   <td>
                     {request.quantity} {request.orderUnit}
@@ -755,7 +861,50 @@ export default function ChatPage() {
     );
   }
 
-  function renderLifecycleArtifact(artifact: Extract<AgentUiArtifact, { type: "created_request" | "cancelled_request" }>) {
+  function renderLifecycleArtifact(
+    artifact: Extract<
+      AgentUiArtifact,
+      { type: "created_request" | "created_basket_request" | "cancelled_request" }
+    >
+  ) {
+    if (artifact.type === "created_basket_request") {
+      return (
+        <section className={styles.artifactPanel}>
+          <div className={styles.artifactHeader}>
+            <div>
+              <div className={styles.artifactEyebrow}>Basket created</div>
+              <h3 className={styles.artifactTitle}>Basket {artifact.basketId}</h3>
+            </div>
+            <div className={styles.artifactMeta}>{artifact.requests.length} line(s)</div>
+          </div>
+          <div className={styles.tableWrap}>
+            <table className={styles.richTable}>
+              <thead>
+                <tr>
+                  <th>Request ID</th>
+                  <th>Product ID</th>
+                  <th>Quantity</th>
+                  <th>Needed by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {artifact.requests.map((request) => (
+                  <tr key={request.requestId}>
+                    <td>{request.requestId}</td>
+                    <td>{request.internalId}</td>
+                    <td>
+                      {request.quantity} {request.orderUnit}
+                    </td>
+                    <td>{request.requestedByDate}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      );
+    }
+
     const label =
       artifact.type === "created_request" ? "Request created" : "Request cancelled";
 
@@ -786,18 +935,25 @@ export default function ChatPage() {
     );
   }
 
-  function renderArtifact(artifact: AgentUiArtifact, key: string) {
-    if (artifact.type === "search_results") {
-      return <div key={key}>{renderSearchResultsArtifact(artifact)}</div>;
+  function renderArtifactGroup(group: RenderArtifactGroup, key: string) {
+    if (group.type === "product_details_group") {
+      return <div key={key}>{renderProductDetailsGroup(group)}</div>;
     }
-    if (artifact.type === "product_details") {
-      return <div key={key}>{renderProductDetailsArtifact(artifact)}</div>;
+    if (group.type === "search_results") {
+      return <div key={key}>{renderSearchResultsArtifact(group)}</div>;
     }
-    if (artifact.type === "reorder_requests") {
-      return <div key={key}>{renderReorderRequestsArtifact(artifact)}</div>;
+    if (group.type === "product_details") {
+      return <div key={key}>{renderProductDetailsArtifact(group)}</div>;
     }
-    if (artifact.type === "created_request" || artifact.type === "cancelled_request") {
-      return <div key={key}>{renderLifecycleArtifact(artifact)}</div>;
+    if (group.type === "reorder_requests") {
+      return <div key={key}>{renderReorderRequestsArtifact(group)}</div>;
+    }
+    if (
+      group.type === "created_request" ||
+      group.type === "created_basket_request" ||
+      group.type === "cancelled_request"
+    ) {
+      return <div key={key}>{renderLifecycleArtifact(group)}</div>;
     }
     return null;
   }
@@ -850,6 +1006,75 @@ export default function ChatPage() {
             <div className={styles.detailItem}>
               <span className={styles.detailLabel}>Requested by</span>
               <strong>{preview.requestedByDate}</strong>
+            </div>
+            {preview.justification && (
+              <div className={styles.detailItem}>
+                <span className={styles.detailLabel}>Justification</span>
+                <strong>{preview.justification}</strong>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    if (pendingApproval.preview.type === "create_basket_reorder_request") {
+      const preview = pendingApproval.preview;
+      return (
+        <div className={styles.approvalPreview}>
+          <div className={styles.approvalSection}>
+            <div className={styles.approvalSectionTitle}>Basket</div>
+            <div className={styles.approvalHeadline}>
+              {preview.items.length} product line{preview.items.length === 1 ? "" : "s"}
+            </div>
+            <div className={styles.approvalMeta}>
+              {preview.deliveryLocation} • {preview.costCenter} • {preview.requestedByDate}
+            </div>
+          </div>
+          <div className={styles.tableWrap}>
+            <table className={styles.richTable}>
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Quantity</th>
+                  <th>Base units</th>
+                  <th>Line total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.items.map((item) => (
+                  <tr key={item.product.internalId}>
+                    <td>
+                      {item.product.description} ({item.product.brand}, ID {item.product.internalId})
+                    </td>
+                    <td>
+                      {item.quantity} {item.orderUnit}
+                    </td>
+                    <td>
+                      {item.baseUnitQuantity} {item.baseUnit}
+                    </td>
+                    <td>{formatCurrency(item.totalPrice, item.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className={styles.detailGrid}>
+            <div className={styles.detailItem}>
+              <span className={styles.detailLabel}>Delivery location</span>
+              <strong>{preview.deliveryLocation}</strong>
+            </div>
+            <div className={styles.detailItem}>
+              <span className={styles.detailLabel}>Cost center</span>
+              <strong>{preview.costCenter}</strong>
+            </div>
+            <div className={styles.detailItem}>
+              <span className={styles.detailLabel}>Requested by</span>
+              <strong>{preview.requestedByDate}</strong>
+            </div>
+            <div className={styles.detailItem}>
+              <span className={styles.detailLabel}>Estimated basket total</span>
+              <strong>{formatCurrency(preview.totalPrice, preview.currency)}</strong>
             </div>
             {preview.justification && (
               <div className={styles.detailItem}>
@@ -916,8 +1141,8 @@ export default function ChatPage() {
             <div>
               <h1 className={styles.title}>Procurement workspace.</h1>
               <p className={styles.subtitle}>
-                Search the catalog, compare plausible matches, inspect product records, and confirm a single reorder
-                action only when the request is ready.
+                Search the catalog, compare plausible matches, inspect product records, and confirm reorder actions
+                only when the request or basket is ready.
               </p>
             </div>
           </div>
@@ -948,7 +1173,7 @@ export default function ChatPage() {
           </label>
           <div className={styles.signalPill}>
             <span className={styles.signalLabel}>Session ID</span>
-            <code className={styles.signalCode}>{sessionId}</code>
+            <code className={styles.signalCode}>{sessionId ?? "Initializing"}</code>
           </div>
         </div>
 
@@ -962,7 +1187,7 @@ export default function ChatPage() {
                     <div className={styles.messageContent}>
                       <p className={styles.messageParagraph}>
                         Welcome in. I can help you search the catalog, compare close matches, inspect product records,
-                        and prepare reorder requests for confirmation.
+                        and prepare single-item or basket reorder requests for confirmation.
                       </p>
                     </div>
                   </article>
@@ -1019,8 +1244,8 @@ export default function ChatPage() {
                   <div className={styles.messageLabel}>{msg.role === "assistant" ? "Assistant" : "You"}</div>
                   <div className={styles.messageContent}>
                     {msg.content ? renderRichText(msg.content) : null}
-                    {msg.artifacts.map((artifact, index) =>
-                      renderArtifact(artifact, `${msg.id}-${artifact.type}-${index}`)
+                    {groupArtifactsForRender(msg.artifacts).map((group, index) =>
+                      renderArtifactGroup(group, `${msg.id}-${group.type}-${index}`)
                     )}
                   </div>
                 </article>
@@ -1036,18 +1261,26 @@ export default function ChatPage() {
                   <button
                     type="button"
                     className={styles.approveButton}
-                    onClick={() => void handleApproval(true)}
+                    onClick={() => void handleApproval("confirm")}
                     disabled={loading}
                   >
-                    Confirm request
+                    Yes
                   </button>
                   <button
                     type="button"
                     className={styles.rejectButton}
-                    onClick={() => void handleApproval(false)}
+                    onClick={() => void handleApproval("edit")}
                     disabled={loading}
                   >
-                    Cancel action
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.rejectButton}
+                    onClick={() => void handleApproval("cancel")}
+                    disabled={loading}
+                  >
+                    No
                   </button>
                 </div>
               </section>
@@ -1090,7 +1323,7 @@ export default function ChatPage() {
               type="button"
               className={styles.sendButton}
               onClick={() => void sendMessage(input)}
-              disabled={loading || !input.trim()}
+              disabled={loading || !input.trim() || !sessionId}
               aria-label="Send message"
             >
               <SendIcon />

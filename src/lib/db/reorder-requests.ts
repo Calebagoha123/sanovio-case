@@ -3,6 +3,7 @@ import { RequestNotFoundError, InvalidStatusTransitionError } from "../errors";
 
 export interface CreateReorderRequestInput {
   sessionId: string;
+  basketId?: string | null;
   internalId: number;
   quantity: number;
   orderUnit: string;
@@ -16,6 +17,7 @@ export interface CreateReorderRequestInput {
 export interface ReorderRequestRow {
   requestId: string;
   sessionId: string;
+  basketId: string | null;
   internalId: number;
   quantity: number;
   orderUnit: string;
@@ -32,6 +34,7 @@ function mapRow(row: Record<string, unknown>): ReorderRequestRow {
   return {
     requestId: row.request_id as string,
     sessionId: row.session_id as string,
+    basketId: row.basket_id as string | null,
     internalId: row.internal_id as number,
     quantity: row.quantity as number,
     orderUnit: row.order_unit as string,
@@ -48,25 +51,38 @@ function mapRow(row: Record<string, unknown>): ReorderRequestRow {
 export async function createReorderRequest(
   input: CreateReorderRequestInput
 ): Promise<ReorderRequestRow> {
+  const [row] = await createReorderRequests([input]);
+  return row;
+}
+
+export async function createReorderRequests(
+  inputs: CreateReorderRequestInput[]
+): Promise<ReorderRequestRow[]> {
+  if (inputs.length === 0) {
+    return [];
+  }
+
   const db = getServiceClient();
   const { data, error } = await db
     .from("reorder_requests")
-    .insert({
-      session_id: input.sessionId,
-      internal_id: input.internalId,
-      quantity: input.quantity,
-      order_unit: input.orderUnit,
-      base_unit_quantity: input.baseUnitQuantity,
-      delivery_location: input.deliveryLocation,
-      cost_center: input.costCenter,
-      requested_by_date: input.requestedByDate,
-      justification: input.justification ?? null,
-    })
-    .select()
-    .single();
+    .insert(
+      inputs.map((input) => ({
+        session_id: input.sessionId,
+        basket_id: input.basketId ?? null,
+        internal_id: input.internalId,
+        quantity: input.quantity,
+        order_unit: input.orderUnit,
+        base_unit_quantity: input.baseUnitQuantity,
+        delivery_location: input.deliveryLocation,
+        cost_center: input.costCenter,
+        requested_by_date: input.requestedByDate,
+        justification: input.justification ?? null,
+      }))
+    )
+    .select();
 
   if (error) throw new Error(`Failed to create reorder request: ${error.message}`);
-  return mapRow(data as Record<string, unknown>);
+  return (data as Record<string, unknown>[]).map(mapRow);
 }
 
 export async function listReorderRequests(

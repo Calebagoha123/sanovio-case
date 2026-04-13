@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, beforeAll } from "vitest";
 import { v4 as uuidv4 } from "uuid";
 import {
   createReorderRequest,
+  createReorderRequests,
   listReorderRequests,
   cancelReorderRequest,
   type CreateReorderRequestInput,
@@ -91,6 +92,37 @@ describe("createReorderRequest", () => {
     expect(data!.delivery_location).toBe(BASE_INPUT.deliveryLocation);
     expect(data!.cost_center).toBe(BASE_INPUT.costCenter);
     expect(data!.requested_by_date).toBe(BASE_INPUT.requestedByDate);
+  });
+});
+
+describe("createReorderRequests", () => {
+  it("inserts multiple rows with a shared basket_id", async () => {
+    const sessionId = uuidv4();
+    const basketId = uuidv4();
+
+    const result = await createReorderRequests([
+      { ...BASE_INPUT, sessionId, basketId, internalId: 1, quantity: 5, baseUnitQuantity: 1000 },
+      {
+        ...BASE_INPUT,
+        sessionId,
+        basketId,
+        internalId: 2,
+        quantity: 2,
+        orderUnit: "pcs",
+        baseUnitQuantity: 2,
+      },
+    ]);
+
+    expect(result).toHaveLength(2);
+    expect(new Set(result.map((row) => row.basketId))).toEqual(new Set([basketId]));
+
+    const { data } = await db
+      .from("reorder_requests")
+      .select("basket_id")
+      .eq("session_id", sessionId)
+      .eq("basket_id", basketId);
+
+    expect(data).toHaveLength(2);
   });
 });
 

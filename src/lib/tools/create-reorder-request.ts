@@ -1,9 +1,8 @@
 import { z } from "zod";
-import { getProductDetails } from "./get-product-details";
-import { normalizeRequestedQuantity } from "../units/convert";
 import { resolveRequestedByDate } from "../dates/resolve-requested-by-date";
 import { createReorderRequest } from "../db/reorder-requests";
 import type { ReorderRequestRow } from "../db/reorder-requests";
+import { prepareReorderRequestLine } from "./reorder-request-line";
 
 export const createReorderRequestProposalInput = z.object({
   internalId: z.number().int().positive(),
@@ -33,23 +32,17 @@ export async function executeCreateReorderRequest(
   rawInput: z.input<typeof createReorderRequestInput>
 ): Promise<ReorderRequestRow> {
   const input = createReorderRequestInput.parse(rawInput);
-  // 1. Validate product exists and get unit info
-  const product = await getProductDetails(input.internalId);
-
-  // 2. Normalize quantity + unit (throws on invalid unit or non-exact multiple)
-  const normalized = normalizeRequestedQuantity(input.quantity, input.requestedUnit, {
-    orderUnit: product.orderUnit,
-    baseUnit: product.baseUnit,
-    baseUnitsPerBme: product.baseUnitsPerBme,
+  const normalized = await prepareReorderRequestLine({
+    internalId: input.internalId,
+    quantity: input.quantity,
+    requestedUnit: input.requestedUnit,
   });
 
-  // 3. Resolve date phrase
   const resolvedDate = resolveRequestedByDate(input.requestedByDate, input.timezone);
 
-  // 4. Persist
   return createReorderRequest({
     sessionId: input.sessionId,
-    internalId: input.internalId,
+    internalId: normalized.internalId,
     quantity: normalized.quantity,
     orderUnit: normalized.orderUnit,
     baseUnitQuantity: normalized.baseUnitQuantity,

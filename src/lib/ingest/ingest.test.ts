@@ -1,20 +1,48 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import path from "path";
+import fs from "fs";
+import os from "os";
+import * as XLSX from "xlsx";
 import { ingestExcel } from "./ingest";
 import { getServiceClient } from "../db/client";
+import { chunkRecords } from "./ingest";
 
 const EXCEL_PATH = path.resolve(
   process.cwd(),
   "data/sample-challenge-v01.xlsx"
 );
+const SYNTHETIC_100_PATH = path.resolve(
+  process.cwd(),
+  "data/synthetic-catalog-100.xlsx"
+);
 
 const db = getServiceClient();
+
+function writeWorkbook(rows: Record<string, unknown>[]): string {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "sanovio-ingest-"));
+  const filePath = path.join(directory, "catalog.xlsx");
+  const workbook = XLSX.utils.book_new();
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
+  XLSX.writeFile(workbook, filePath);
+  return filePath;
+}
 
 beforeEach(async () => {
   await db.from("products").delete().neq("internal_id", 0);
 });
 
 describe("ingest", () => {
+  it("chunks records into fixed-size batches with a smaller tail batch", () => {
+    const batches = chunkRecords(
+      Array.from({ length: 2505 }, (_, index) => index + 1),
+      1000
+    );
+
+    expect(batches).toHaveLength(3);
+    expect(batches.map((batch) => batch.length)).toEqual([1000, 1000, 505]);
+  });
+
   it("produces exactly 10 rows from the sample file", async () => {
     await ingestExcel(EXCEL_PATH);
     const { count } = await db
@@ -114,5 +142,82 @@ describe("ingest", () => {
 
   it("throws a clear error when a required column is missing", async () => {
     await expect(ingestExcel("data/nonexistent.xlsx")).rejects.toThrow();
+  });
+
+  it("ingests the synthetic 100-row dataset successfully", async () => {
+    await ingestExcel(SYNTHETIC_100_PATH);
+    const { count } = await db
+      .from("products")
+      .select("*", { count: "exact", head: true });
+    expect(count).toBe(100);
+  });
+
+  it("rejects rows with an invalid internal_id", async () => {
+    const filePath = writeWorkbook([
+      {
+        internal_id: "abc",
+        Artikelbezeichnung: "Invalid internal id row",
+        Marke: "Contoso",
+        Artikelnummer: "BAD-1",
+        Jahresmenge: 10,
+        Bestellmengeneinheit: "Box",
+        "Basismengeneinheiten pro BME": 5,
+        Basismengeneinheit: "Stück",
+        GTIN: "'1234567890123",
+        "MDR-Klasse": "I",
+        "Netto-Zielpreis": 1.25,
+        Währung: "CHF",
+      },
+    ]);
+
+    await expect(ingestExcel(filePath)).rejects.toThrow(
+      'Invalid value for "internal_id" on row 2: expected an integer'
+    );
+  });
+
+  it("rejects rows with blank required text fields", async () => {
+    const filePath = writeWorkbook([
+      {
+        internal_id: 11,
+        Artikelbezeichnung: "   ",
+        Marke: "Contoso",
+        Artikelnummer: "BAD-2",
+        Jahresmenge: 10,
+        Bestellmengeneinheit: "Box",
+        "Basismengeneinheiten pro BME": 5,
+        Basismengeneinheit: "Stück",
+        GTIN: "'1234567890123",
+        "MDR-Klasse": "I",
+        "Netto-Zielpreis": 1.25,
+        Währung: "CHF",
+      },
+    ]);
+
+    await expect(ingestExcel(filePath)).rejects.toThrow(
+      'Invalid value for "Artikelbezeichnung" on row 2: expected a non-empty string'
+    );
+  });
+
+  it("rejects rows with invalid pack-size numbers", async () => {
+    const filePath = writeWorkbook([
+      {
+        internal_id: 12,
+        Artikelbezeichnung: "Broken pack size item",
+        Marke: "Contoso",
+        Artikelnummer: "BAD-3",
+        Jahresmenge: 10,
+        Bestellmengeneinheit: "Box",
+        "Basismengeneinheiten pro BME": 0,
+        Basismengeneinheit: "Stück",
+        GTIN: "'1234567890123",
+        "MDR-Klasse": "I",
+        "Netto-Zielpreis": 1.25,
+        Währung: "CHF",
+      },
+    ]);
+
+    await expect(ingestExcel(filePath)).rejects.toThrow(
+      'Invalid value for "Basismengeneinheiten pro BME" on row 2: expected >= 1'
+    );
   });
 });

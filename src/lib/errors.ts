@@ -45,6 +45,15 @@ export class NonExactPackMultipleError extends Error {
   }
 }
 
+export class DuplicateBasketProductError extends Error {
+  constructor(internalId: number) {
+    super(
+      `Basket order contains duplicate product ${internalId}. Use one line per product in a basket request.`
+    );
+    this.name = "DuplicateBasketProductError";
+  }
+}
+
 export class RequestNotFoundError extends Error {
   constructor(requestId: string) {
     super(`Reorder request not found: ${requestId}`);
@@ -58,5 +67,12 @@ export class InvalidStatusTransitionError extends Error {
       `Cannot cancel request ${requestId}: current status is "${currentStatus}"`
     );
     this.name = "InvalidStatusTransitionError";
+  }
+}
+
+export class ApprovalExpiredError extends Error {
+  constructor(expiresAt: string) {
+    super(`Pending approval expired at ${expiresAt}`);
+    this.name = "ApprovalExpiredError";
   }
 }

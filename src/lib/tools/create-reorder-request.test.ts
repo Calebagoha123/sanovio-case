@@ -86,6 +86,23 @@ describe("executeCreateReorderRequest", () => {
     expect(data!.order_unit).toBe("box");
   });
 
+  it("handles concurrent reorder submissions with distinct request ids", async () => {
+    const [first, second, third] = await Promise.all([
+      executeCreateReorderRequest({ ...BASE_INPUT, sessionId: uuidv4() }),
+      executeCreateReorderRequest({ ...BASE_INPUT, sessionId: uuidv4() }),
+      executeCreateReorderRequest({ ...BASE_INPUT, sessionId: uuidv4() }),
+    ]);
+
+    const ids = new Set([first.requestId, second.requestId, third.requestId]);
+    expect(ids.size).toBe(3);
+
+    const { count } = await db
+      .from("reorder_requests")
+      .select("*", { count: "exact", head: true })
+      .in("request_id", [first.requestId, second.requestId, third.requestId]);
+    expect(count).toBe(3);
+  });
+
   it("rejects a past requestedByDate", async () => {
     await expect(
       executeCreateReorderRequest({

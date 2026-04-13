@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { v4 as uuidv4 } from "uuid";
 import { executeListReorderRequests } from "./list-reorder-requests";
 import { createReorderRequest } from "../db/reorder-requests";
@@ -25,6 +25,10 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.from("reorder_requests").delete().neq("request_id", "00000000-0000-0000-0000-000000000000");
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 const BASE = {
@@ -61,5 +65,23 @@ describe("executeListReorderRequests", () => {
 
     const result = await executeListReorderRequests(s2);
     expect(result).toHaveLength(0);
+  });
+
+  it("logs timing and result count for the session lookup", async () => {
+    const sessionId = uuidv4();
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await createReorderRequest({ ...BASE, sessionId });
+    await executeListReorderRequests(sessionId);
+
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining('"event":"list_reorder_requests_complete"')
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`"sessionId":"${sessionId}"`)
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      expect.stringContaining('"resultCount":1')
+    );
   });
 });

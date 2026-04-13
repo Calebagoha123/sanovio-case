@@ -5,13 +5,22 @@ import {
   createReorderRequestProposalInput,
 } from "../tools/create-reorder-request";
 import {
+  createBasketReorderRequestInput,
+  createBasketReorderRequestProposalInput,
+} from "../tools/create-basket-reorder-request";
+import {
   cancelReorderRequestInput,
   cancelReorderRequestProposalInput,
 } from "../tools/cancel-reorder-request";
-import { normalizeRequestedQuantity } from "../units/convert";
 import { resolveRequestedByDate } from "../dates/resolve-requested-by-date";
 import { getServiceClient } from "../db/client";
 import { RequestNotFoundError } from "../errors";
+import {
+  prepareReorderRequestLine,
+  prepareReorderRequestLines,
+  summarizePreparedReorderLines,
+} from "../tools/reorder-request-line";
+import { createApprovalExpiry } from "./approval-execution";
 
 export interface PendingToolCall extends PendingApprovalPayload {}
 
@@ -55,20 +64,17 @@ async function buildCreateReorderRequestPendingToolCall(
   timezone: string
 ): Promise<PendingToolCall> {
   const parsed = createReorderRequestProposalInput.parse(rawInput);
-  const product = await getProductDetails(parsed.internalId);
-  const normalized = normalizeRequestedQuantity(parsed.quantity, parsed.requestedUnit, {
-    orderUnit: product.orderUnit,
-    baseUnit: product.baseUnit,
-    baseUnitsPerBme: product.baseUnitsPerBme,
+  const normalized = await prepareReorderRequestLine({
+    internalId: parsed.internalId,
+    quantity: parsed.quantity,
+    requestedUnit: parsed.requestedUnit,
   });
   const resolvedDate = resolveRequestedByDate(parsed.requestedByDate, timezone);
-  const totalPrice =
-    product.netTargetPrice === null ? null : Number((product.netTargetPrice * normalized.quantity).toFixed(2));
 
   const toolInput = createReorderRequestInput.parse({
     sessionId,
     timezone,
-    internalId: parsed.internalId,
+    internalId: normalized.internalId,
     quantity: normalized.quantity,
     requestedUnit: normalized.orderUnit,
     deliveryLocation: parsed.deliveryLocation,
@@ -76,22 +82,23 @@ async function buildCreateReorderRequestPendingToolCall(
     requestedByDate: resolvedDate,
     justification: parsed.justification,
   });
+  const expiry = createApprovalExpiry();
 
   return {
     toolCallId,
     toolName: "createReorderRequest",
     toolInput,
     summary: formatCreateSummary({
-      internalId: parsed.internalId,
-      description: product.description,
-      brand: product.brand,
+      internalId: normalized.internalId,
+      description: normalized.description,
+      brand: normalized.brand,
       quantity: normalized.quantity,
       orderUnit: normalized.orderUnit,
       baseUnitQuantity: normalized.baseUnitQuantity,
-      baseUnit: product.baseUnit,
-      unitPrice: product.netTargetPrice,
-      totalPrice,
-      currency: product.currency ?? null,
+      baseUnit: normalized.baseUnit,
+      unitPrice: normalized.unitPrice,
+      totalPrice: normalized.totalPrice,
+      currency: normalized.currency,
       deliveryLocation: parsed.deliveryLocation,
       costCenter: parsed.costCenter,
       requestedByDate: resolvedDate,
@@ -100,22 +107,115 @@ async function buildCreateReorderRequestPendingToolCall(
     preview: {
       type: "create_reorder_request",
       product: {
-        internalId: product.internalId,
-        description: product.description,
-        brand: product.brand,
+        internalId: normalized.internalId,
+        description: normalized.description,
+        brand: normalized.brand,
       },
       quantity: normalized.quantity,
       orderUnit: normalized.orderUnit,
       baseUnitQuantity: normalized.baseUnitQuantity,
-      baseUnit: product.baseUnit,
-      unitPrice: product.netTargetPrice,
-      totalPrice,
-      currency: product.currency ?? null,
+      baseUnit: normalized.baseUnit,
+      unitPrice: normalized.unitPrice,
+      totalPrice: normalized.totalPrice,
+      currency: normalized.currency,
       deliveryLocation: parsed.deliveryLocation,
       costCenter: parsed.costCenter,
       requestedByDate: resolvedDate,
       justification: parsed.justification,
     },
+    ...expiry,
+  };
+}
+
+function formatBasketCreateSummary(args: {
+  items: Awaited<ReturnType<typeof prepareReorderRequestLines>>;
+  totalPrice: number | null;
+  currency: string | null;
+  deliveryLocation: string;
+  costCenter: string;
+  requestedByDate: string;
+  justification?: string;
+}): string {
+  return [
+    "Create reorder basket:",
+    ...args.items.map(
+      (item, index) =>
+        `  ${index + 1}. ${item.description} (${item.brand}, #${item.internalId}) — ` +
+        `${item.quantity} ${item.orderUnit} (= ${item.baseUnitQuantity} ${item.baseUnit})`
+    ),
+    ...(args.totalPrice !== null && args.currency
+      ? [`  Estimated basket total: ${args.currency} ${args.totalPrice}`]
+      : []),
+    `  Deliver to: ${args.deliveryLocation}`,
+    `  Cost center: ${args.costCenter}`,
+    `  Needed by: ${args.requestedByDate}`,
+    ...(args.justification ? [`  Justification: ${args.justification}`] : []),
+  ].join("\n");
+}
+
+async function buildCreateBasketReorderRequestPendingToolCall(
+  toolCallId: string,
+  rawInput: Record<string, unknown>,
+  sessionId: string,
+  timezone: string
+): Promise<PendingToolCall> {
+  const parsed = createBasketReorderRequestProposalInput.parse(rawInput);
+  const items = await prepareReorderRequestLines(parsed.items);
+  const resolvedDate = resolveRequestedByDate(parsed.requestedByDate, timezone);
+  const pricing = summarizePreparedReorderLines(items);
+
+  const toolInput = createBasketReorderRequestInput.parse({
+    sessionId,
+    timezone,
+    items: items.map((item) => ({
+      internalId: item.internalId,
+      quantity: item.quantity,
+      requestedUnit: item.orderUnit,
+    })),
+    deliveryLocation: parsed.deliveryLocation,
+    costCenter: parsed.costCenter,
+    requestedByDate: resolvedDate,
+    justification: parsed.justification,
+  });
+  const expiry = createApprovalExpiry();
+
+  return {
+    toolCallId,
+    toolName: "createBasketReorderRequest",
+    toolInput,
+    summary: formatBasketCreateSummary({
+      items,
+      totalPrice: pricing.totalPrice,
+      currency: pricing.currency,
+      deliveryLocation: parsed.deliveryLocation,
+      costCenter: parsed.costCenter,
+      requestedByDate: resolvedDate,
+      justification: parsed.justification,
+    }),
+    preview: {
+      type: "create_basket_reorder_request",
+      items: items.map((item) => ({
+        product: {
+          internalId: item.internalId,
+          description: item.description,
+          brand: item.brand,
+        },
+        quantity: item.quantity,
+        orderUnit: item.orderUnit,
+        baseUnitQuantity: item.baseUnitQuantity,
+        baseUnit: item.baseUnit,
+        unitPrice: item.unitPrice,
+        totalPrice: item.totalPrice,
+        currency: item.currency,
+      })),
+      totalPrice: pricing.totalPrice,
+      currency: pricing.currency,
+      deliveryLocation: parsed.deliveryLocation,
+      costCenter: parsed.costCenter,
+      requestedByDate: resolvedDate,
+      justification: parsed.justification,
+    },
+    ...expiry,
   };
 }
 
@@ -174,6 +274,7 @@ async function buildCancelReorderRequestPendingToolCall(
       requestedByDate: data.requested_by_date as string,
       status: data.status as "pending" | "cancelled",
     },
+    ...createApprovalExpiry(),
   };
 }
 
@@ -186,6 +287,15 @@ export async function buildPendingToolCall(args: {
 }): Promise<PendingToolCall> {
   if (args.toolName === "createReorderRequest") {
     return buildCreateReorderRequestPendingToolCall(
+      args.toolCallId,
+      args.rawInput,
+      args.sessionId,
+      args.timezone
+    );
+  }
+
+  if (args.toolName === "createBasketReorderRequest") {
+    return buildCreateBasketReorderRequestPendingToolCall(
       args.toolCallId,
       args.rawInput,
       args.sessionId,

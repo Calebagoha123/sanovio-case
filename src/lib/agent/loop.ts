@@ -1,6 +1,6 @@
 import { generateText, stepCountIs } from "ai";
 import type { LanguageModel, ModelMessage } from "ai";
-import { AGENT_SYSTEM_PROMPT, MAX_HISTORY_TURNS, createAgentTools } from "./agent";
+import { getAgentSystemPrompt, MAX_HISTORY_TURNS, createAgentTools } from "./agent";
 import { buildPendingToolCall, type PendingToolCall } from "./pending-write";
 import { logAgentEvent } from "./logging";
 import { formatUserFacingError } from "./user-facing-errors";
@@ -31,26 +31,173 @@ export interface RunAgentTurnOptions {
   timezone?: string;
   userMessage: string;
   history: ModelMessage[];
+  systemPromptOverride?: string;
+}
+
+function getMessageText(message: ModelMessage): string {
+  if (typeof message.content === "string") {
+    return message.content;
+  }
+
+  if (Array.isArray(message.content)) {
+    return message.content
+      .map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+
+        if (
+          typeof part === "object" &&
+          part !== null &&
+          "text" in part &&
+          typeof (part as { text?: unknown }).text === "string"
+        ) {
+          return (part as { text: string }).text;
+        }
+
+        return "";
+      })
+      .join("\n");
+  }
+
+  return "";
+}
+
+function augmentOrderingIntentWithRecentProductContext(
+  userMessage: string,
+  history: ModelMessage[]
+): string {
+  const hasOrderingIntent = /\b(order|reorder|request)\b/i.test(userMessage);
+  const hasExplicitCurrentProductReference =
+    /\b(?:internal id|product)\s*#?\s*\d+\b/i.test(userMessage);
+  const hasNamedProductInCurrentOrderMessage = mentionsNamedProductInOrderRequest(userMessage);
+
+  if (
+    !hasOrderingIntent ||
+    hasExplicitCurrentProductReference ||
+    hasNamedProductInCurrentOrderMessage
+  ) {
+    return userMessage;
+  }
+
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index];
+    if (message.role !== "user") {
+      continue;
+    }
+
+    const text = getMessageText(message);
+    const match = text.match(/\b(?:internal id|product)\s*#?\s*(\d+)\b/i);
+    if (!match) {
+      continue;
+    }
+
+    return `${userMessage}\n\nContext: the most recently referenced exact product in this conversation is internal ID ${match[1]}. Use a fresh tool lookup for that product and prefer it over prior assistant summaries if they conflict. If the current message already provides quantity and delivery metadata, continue directly to the write approval flow after confirming the product with tools.`;
+  }
+
+  return userMessage;
+}
+
+function mentionsNamedProductInOrderRequest(userMessage: string): boolean {
+  const match = userMessage.match(/\b(?:order|reorder|request)\b\s+(.+)/i);
+  if (!match) {
+    return false;
+  }
+
+  const relevantSegment = match[1]
+    .split(/\b(?:for|to|deliver(?:y)?|cost center|needed by|need(?:ed)? by|by)\b/i)[0]
+    .trim();
+  const words = relevantSegment.toLowerCase().match(/[a-z][a-z-]*/g) ?? [];
+
+  if (words.length === 0) {
+    return false;
+  }
+
+  const operationalWords = new Set([
+    "a",
+    "an",
+    "the",
+    "it",
+    "this",
+    "that",
+    "please",
+    "more",
+    "another",
+    "of",
+    "box",
+    "boxes",
+    "pack",
+    "packs",
+    "piece",
+    "pieces",
+    "pcs",
+    "can",
+    "cans",
+    "role",
+    "roles",
+  ]);
+
+  return words.some((word) => !operationalWords.has(word));
 }
 
 function condenseArtifacts(artifacts: AgentUiArtifact[]): AgentUiArtifact[] {
+  const keepAllTypes = new Set<AgentUiArtifact["type"]>(["search_results", "product_details"]);
   const latestByType = new Map<AgentUiArtifact["type"], AgentUiArtifact>();
+  const preserved: AgentUiArtifact[] = [];
 
   for (const artifact of artifacts) {
+    if (keepAllTypes.has(artifact.type)) {
+      preserved.push(artifact);
+      continue;
+    }
     latestByType.set(artifact.type, artifact);
   }
 
-  const orderedTypes: AgentUiArtifact["type"][] = [
-    "search_results",
-    "product_details",
+  const orderedLatestTypes: AgentUiArtifact["type"][] = [
     "reorder_requests",
     "created_request",
+    "created_basket_request",
     "cancelled_request",
   ];
 
-  return orderedTypes
-    .map((type) => latestByType.get(type))
-    .filter((artifact): artifact is AgentUiArtifact => artifact !== undefined);
+  return [
+    ...preserved,
+    ...orderedLatestTypes
+      .map((type) => latestByType.get(type))
+      .filter((artifact): artifact is AgentUiArtifact => artifact !== undefined),
+  ];
+}
+
+function stripArtifactsForWriteApproval(
+  artifacts: AgentUiArtifact[],
+  pendingToolName: PendingToolCall["toolName"]
+): AgentUiArtifact[] {
+  if (
+    pendingToolName !== "createReorderRequest" &&
+    pendingToolName !== "createBasketReorderRequest"
+  ) {
+    return artifacts;
+  }
+
+  return artifacts.filter((artifact) => artifact.type !== "product_details");
+}
+
+function stripArtifactsForOrderMetadataCollection(
+  artifacts: AgentUiArtifact[],
+  userMessage: string,
+  text: string
+): AgentUiArtifact[] {
+  const orderingIntent = /\b(order|reorder|request)\b/i.test(userMessage);
+  const collectingDeliveryMetadata =
+    /delivery location/i.test(text) &&
+    /cost center/i.test(text) &&
+    /requested-by date|requested by date|need it by/i.test(text);
+
+  if (!orderingIntent || !collectingDeliveryMetadata) {
+    return artifacts;
+  }
+
+  return artifacts.filter((artifact) => artifact.type !== "product_details");
 }
 
 /**
@@ -69,9 +216,18 @@ export async function runAgentTurn({
   timezone = "Europe/Zurich",
   userMessage,
   history,
+  systemPromptOverride,
 }: RunAgentTurnOptions): Promise<AgentTurnResult> {
   const trimmedHistory = trimHistory(history);
-  const messages: ModelMessage[] = [
+  const enrichedUserMessage = augmentOrderingIntentWithRecentProductContext(
+    userMessage,
+    trimmedHistory
+  );
+  const messagesForModel: ModelMessage[] = [
+    ...trimmedHistory,
+    { role: "user", content: enrichedUserMessage },
+  ];
+  const updatedHistoryBase: ModelMessage[] = [
     ...trimmedHistory,
     { role: "user", content: userMessage },
   ];
@@ -82,12 +238,19 @@ export async function runAgentTurn({
   const artifacts: AgentUiArtifact[] = [];
 
   try {
+    const modelStartedAt = Date.now();
     const result = await generateText({
       model,
-      system: AGENT_SYSTEM_PROMPT,
-      messages,
+      system: systemPromptOverride ?? getAgentSystemPrompt(timezone),
+      messages: messagesForModel,
       tools: createAgentTools(sessionId),
       stopWhen: stepCountIs(5),
+    });
+    logAgentEvent("model_generation_complete", {
+      sessionId,
+      durationMs: Date.now() - modelStartedAt,
+      stepCount: result.steps.length,
+      textLength: (result.text ?? "").length,
     });
 
     text = result.text ?? "";
@@ -150,11 +313,13 @@ export async function runAgentTurn({
             text: "",
             toolCallsMade,
             requiresApproval: true,
-          pendingToolCall,
+            pendingToolCall,
             toolErrors,
-            artifacts: condenseArtifacts(artifacts),
-            updatedHistory: messages,
-        };
+            artifacts: condenseArtifacts(
+              stripArtifactsForWriteApproval(artifacts, pendingToolCall.toolName)
+            ),
+            updatedHistory: updatedHistoryBase,
+          };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           const friendly = formatUserFacingError(msg, getCurrentHospitalDate(timezone));
@@ -172,7 +337,7 @@ export async function runAgentTurn({
             toolErrors,
             artifacts: condenseArtifacts(artifacts),
             updatedHistory: [
-              ...messages,
+              ...updatedHistoryBase,
               {
                 role: "assistant" as const,
                 content: friendly ?? `I hit an operational issue while preparing that action: ${msg}`,
@@ -186,6 +351,10 @@ export async function runAgentTurn({
     const msg = err instanceof Error ? err.message : String(err);
     toolErrors.push(msg);
     text = `An error occurred: ${msg}`;
+    logAgentEvent("model_generation_failed", {
+      sessionId,
+      error: msg,
+    });
     logAgentEvent("agent_turn_error", {
       sessionId,
       error: msg,
@@ -205,9 +374,11 @@ export async function runAgentTurn({
     requiresApproval: false,
     pendingToolCall: null,
     toolErrors,
-    artifacts: condenseArtifacts(artifacts),
+    artifacts: condenseArtifacts(
+      stripArtifactsForOrderMetadataCollection(artifacts, userMessage, text)
+    ),
     updatedHistory: [
-      ...messages,
+      ...updatedHistoryBase,
       ...(text ? [{ role: "assistant" as const, content: text }] : []),
     ],
   };

@@ -182,6 +182,10 @@ export function resolveRequestedByDate(input: string, timezone?: string): string
     return format(addWeeks(nowInZone(activeTimezone), 2), "yyyy-MM-dd");
   }
 
+  if (lowerFull === "next week") {
+    return format(addWeeks(nowInZone(activeTimezone), 1), "yyyy-MM-dd");
+  }
+
   // weekday name
   if (lower in DAY_NAMES) {
     const targetDay = DAY_NAMES[lower] as 0 | 1 | 2 | 3 | 4 | 5 | 6;

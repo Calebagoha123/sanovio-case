@@ -1,6 +1,42 @@
-import type { ReorderRequestRow } from "../db/reorder-requests";
-import type { ProductDetails } from "../tools/get-product-details";
-import type { ProductSearchResult } from "../tools/search-catalog";
+export interface ProductSearchResult {
+  internalId: number;
+  description: string;
+  brand: string;
+  orderUnit: string;
+  netTargetPrice: number | null;
+  currency: string;
+}
+
+export interface ProductDetails {
+  internalId: number;
+  description: string;
+  brand: string;
+  supplierArticleNo: string | null;
+  gtinEan: string | null;
+  orderUnit: string;
+  baseUnit: string;
+  baseUnitsPerBme: number;
+  netTargetPrice: number | null;
+  currency: string;
+  annualQuantity: number | null;
+  mdrClass: string | null;
+}
+
+export interface ReorderRequestRow {
+  requestId: string;
+  sessionId: string;
+  basketId: string | null;
+  internalId: number;
+  quantity: number;
+  orderUnit: string;
+  baseUnitQuantity: number;
+  deliveryLocation: string;
+  costCenter: string;
+  requestedByDate: string;
+  justification: string | null;
+  status: "pending" | "cancelled";
+  createdAt: string;
+}
 
 export interface ProductReference {
   internalId: number;
@@ -29,6 +65,12 @@ export interface CreatedRequestArtifact {
   request: ReorderRequestRow;
 }
 
+export interface CreatedBasketRequestArtifact {
+  type: "created_basket_request";
+  basketId: string;
+  requests: ReorderRequestRow[];
+}
+
 export interface CancelledRequestArtifact {
   type: "cancelled_request";
   request: ReorderRequestRow;
@@ -39,7 +81,19 @@ export type AgentUiArtifact =
   | ProductDetailsArtifact
   | ReorderRequestsArtifact
   | CreatedRequestArtifact
+  | CreatedBasketRequestArtifact
   | CancelledRequestArtifact;
+
+export interface BasketApprovalPreviewItem {
+  product: ProductReference;
+  quantity: number;
+  orderUnit: string;
+  baseUnitQuantity: number;
+  baseUnit: string;
+  unitPrice: number | null;
+  totalPrice: number | null;
+  currency: string | null;
+}
 
 export interface CreateReorderApprovalPreview {
   type: "create_reorder_request";
@@ -49,6 +103,17 @@ export interface CreateReorderApprovalPreview {
   baseUnitQuantity: number;
   baseUnit: string;
   unitPrice: number | null;
+  totalPrice: number | null;
+  currency: string | null;
+  deliveryLocation: string;
+  costCenter: string;
+  requestedByDate: string;
+  justification?: string;
+}
+
+export interface CreateBasketReorderApprovalPreview {
+  type: "create_basket_reorder_request";
+  items: BasketApprovalPreviewItem[];
   totalPrice: number | null;
   currency: string | null;
   deliveryLocation: string;
@@ -71,6 +136,7 @@ export interface CancelReorderApprovalPreview {
 
 export type ApprovalPreview =
   | CreateReorderApprovalPreview
+  | CreateBasketReorderApprovalPreview
   | CancelReorderApprovalPreview;
 
 export interface PendingApprovalPayload {
@@ -79,4 +145,6 @@ export interface PendingApprovalPayload {
   toolInput: Record<string, unknown>;
   summary: string;
   preview?: ApprovalPreview;
+  createdAt: string;
+  expiresAt: string;
 }

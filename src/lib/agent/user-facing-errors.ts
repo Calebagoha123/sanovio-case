@@ -11,5 +11,9 @@ export function formatUserFacingError(message: string, currentDate: string): str
     return "Please enter a delivery date before I stage the request.";
   }
 
+  if (/pending approval expired at/i.test(message)) {
+    return "That confirmation expired. Please resubmit the request so I can generate a fresh approval summary.";
+  }
+
   return null;
 }

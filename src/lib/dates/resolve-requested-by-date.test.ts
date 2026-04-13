@@ -32,6 +32,10 @@ describe("resolveRequestedByDate", () => {
     expect(resolveRequestedByDate("next Monday")).toBe("2026-04-20");
   });
 
+  it("resolves 'next week' to one week after the current local date", () => {
+    expect(resolveRequestedByDate("next week")).toBe("2026-04-22");
+  });
+
   it("resolves 'Friday' to 2026-04-17 (next occurrence of Friday after Wednesday)", () => {
     expect(resolveRequestedByDate("Friday")).toBe("2026-04-17");
   });
@@ -57,9 +61,7 @@ describe("resolveRequestedByDate", () => {
 
   it("rejects today's date as 'past or today is not allowed for delivery'", () => {
     // today itself: we require strictly future date for delivery
-    // design doc says "resolved past dates are rejected"
-    // today should pass (it's the minimum — on the boundary)
-    // Actually DESIGN.md says "Resolved past dates are rejected" — today is not past
+    // today should pass because it is on the boundary, not in the past
     expect(resolveRequestedByDate("2026-04-15")).toBe("2026-04-15");
   });
 

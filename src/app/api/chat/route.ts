@@ -3,23 +3,20 @@ import type { ModelMessage } from "ai";
 import { runAgentTurn } from "@/lib/agent/loop";
 import { MODEL } from "@/lib/agent/agent";
 import { executeCreateReorderRequest } from "@/lib/tools/create-reorder-request";
+import { executeCreateBasketReorderRequest } from "@/lib/tools/create-basket-reorder-request";
 import { executeCancelReorderRequest } from "@/lib/tools/cancel-reorder-request";
 import { createReorderRequestInput } from "@/lib/tools/create-reorder-request";
+import { createBasketReorderRequestInput } from "@/lib/tools/create-basket-reorder-request";
 import { cancelReorderRequestInput } from "@/lib/tools/cancel-reorder-request";
 import { logAgentEvent } from "@/lib/agent/logging";
 import { createRequestTimer } from "@/lib/agent/logging";
 import { formatUserFacingError } from "@/lib/agent/user-facing-errors";
+import { executeApprovalOnce, isPendingApprovalExpired } from "@/lib/agent/approval-execution";
 import { getCurrentHospitalDate } from "@/lib/dates/resolve-requested-by-date";
-import type { AgentUiArtifact, PendingApprovalPayload } from "@/lib/chat/ui-contract";
-
-export interface ChatRequest {
-  sessionId: string;
-  timezone?: string;
-  message: string;
-  history: ModelMessage[];
-  approve?: boolean;
-  pendingToolCall?: PendingApprovalPayload;
-}
+import type { ChatRequest, ChatStreamEvent } from "@/lib/chat/api-contract";
+import type { AgentUiArtifact } from "@/lib/chat/ui-contract";
+import type { PendingApprovalPayload } from "@/lib/chat/ui-contract";
+import { ApprovalExpiredError } from "@/lib/errors";
 
 interface ChatPayload {
   text: string;
@@ -31,12 +28,6 @@ interface ChatPayload {
   updatedHistory: ModelMessage[];
 }
 
-export type ChatStreamEvent =
-  | { type: "assistant_chunk"; chunk: string }
-  | { type: "approval"; payload: ChatPayload }
-  | { type: "complete"; payload: ChatPayload }
-  | { type: "error"; message: string };
-
 const encoder = new TextEncoder();
 
 function emitEvent(controller: ReadableStreamDefaultController<Uint8Array>, event: ChatStreamEvent) {
@@ -45,6 +36,101 @@ function emitEvent(controller: ReadableStreamDefaultController<Uint8Array>, even
 
 function createPayload(args: ChatPayload): ChatPayload {
   return args;
+}
+
+async function executePendingApproval(args: {
+  sessionId: string;
+  timezone: string;
+  pendingToolCall: PendingApprovalPayload;
+}): Promise<{ text: string; artifacts: AgentUiArtifact[]; toolCallsMade: string[]; reused: boolean }> {
+  const { sessionId, timezone, pendingToolCall } = args;
+
+  if (isPendingApprovalExpired(pendingToolCall)) {
+    throw new ApprovalExpiredError(pendingToolCall.expiresAt);
+  }
+
+  return executeApprovalOnce(pendingToolCall.toolCallId, async () => {
+    let resultText = "";
+    let artifacts: AgentUiArtifact[] = [];
+
+    if (pendingToolCall.toolName === "createReorderRequest") {
+      const input = createReorderRequestInput.parse(pendingToolCall.toolInput);
+      if (input.sessionId !== sessionId) {
+        throw new Error("Pending create request does not belong to this session.");
+      }
+      if (input.timezone !== timezone) {
+        throw new Error("Pending create request does not match the active timezone.");
+      }
+      const row = await executeCreateReorderRequest(input);
+      logAgentEvent("tool_approval_executed", {
+        sessionId,
+        toolName: pendingToolCall.toolName,
+        toolCallId: pendingToolCall.toolCallId,
+        requestId: row.requestId,
+      });
+      resultText =
+        `Reorder request created successfully.\n` +
+        `Request ID: ${row.requestId}\n` +
+        `Product: ${row.internalId} — ${row.quantity} ${row.orderUnit}\n` +
+        `Deliver to: ${row.deliveryLocation} (${row.costCenter}) by ${row.requestedByDate}`;
+      artifacts = [{ type: "created_request", request: row }];
+    } else if (pendingToolCall.toolName === "createBasketReorderRequest") {
+      const input = createBasketReorderRequestInput.parse(pendingToolCall.toolInput);
+      if (input.sessionId !== sessionId) {
+        throw new Error("Pending basket request does not belong to this session.");
+      }
+      if (input.timezone !== timezone) {
+        throw new Error("Pending basket request does not match the active timezone.");
+      }
+      const result = await executeCreateBasketReorderRequest(input);
+      logAgentEvent("tool_approval_executed", {
+        sessionId,
+        toolName: pendingToolCall.toolName,
+        toolCallId: pendingToolCall.toolCallId,
+        basketId: result.basketId,
+        requestCount: result.requests.length,
+      });
+      resultText = [
+        "Reorder basket created successfully.",
+        `Basket ID: ${result.basketId}`,
+        ...result.requests.map(
+          (request, index) =>
+            `${index + 1}. Request ${request.requestId} — Product ${request.internalId} — ` +
+            `${request.quantity} ${request.orderUnit}`
+        ),
+        `Deliver to: ${input.deliveryLocation} (${input.costCenter}) by ${result.requests[0]?.requestedByDate ?? input.requestedByDate}`,
+      ].join("\n");
+      artifacts = [
+        {
+          type: "created_basket_request",
+          basketId: result.basketId,
+          requests: result.requests,
+        },
+      ];
+    } else if (pendingToolCall.toolName === "cancelReorderRequest") {
+      const input = cancelReorderRequestInput.parse(pendingToolCall.toolInput);
+      if (input.sessionId !== sessionId) {
+        throw new Error("Pending cancel request does not belong to this session.");
+      }
+      const row = await executeCancelReorderRequest(input.requestId, input.sessionId);
+      logAgentEvent("tool_approval_executed", {
+        sessionId,
+        toolName: pendingToolCall.toolName,
+        toolCallId: pendingToolCall.toolCallId,
+        requestId: row.requestId,
+      });
+      resultText = `Reorder request ${row.requestId} has been cancelled.`;
+      artifacts = [{ type: "cancelled_request", request: row }];
+    } else {
+      resultText = `Unknown tool: ${pendingToolCall.toolName}`;
+    }
+
+    return {
+      text: resultText,
+      artifacts,
+      toolCallsMade: [pendingToolCall.toolName],
+    };
+  });
 }
 
 function streamText(controller: ReadableStreamDefaultController<Uint8Array>, text: string) {
@@ -105,70 +191,35 @@ export async function POST(req: NextRequest): Promise<Response> {
     async start(controller) {
       try {
         if (approve && pendingToolCall) {
-          let resultText = "";
-          let artifacts: AgentUiArtifact[] = [];
-
-          if (pendingToolCall.toolName === "createReorderRequest") {
-            const input = createReorderRequestInput.parse(pendingToolCall.toolInput);
-            if (input.sessionId !== sessionId) {
-              throw new Error("Pending create request does not belong to this session.");
-            }
-            if (input.timezone !== timezone) {
-              throw new Error("Pending create request does not match the active timezone.");
-            }
-            const row = await executeCreateReorderRequest(input);
-            logAgentEvent("tool_approval_executed", {
-              sessionId,
-              toolName: pendingToolCall.toolName,
-              toolCallId: pendingToolCall.toolCallId,
-              requestId: row.requestId,
-            });
-            resultText =
-              `Reorder request created successfully.\n` +
-              `Request ID: ${row.requestId}\n` +
-              `Product: ${row.internalId} — ${row.quantity} ${row.orderUnit}\n` +
-              `Deliver to: ${row.deliveryLocation} (${row.costCenter}) by ${row.requestedByDate}`;
-            artifacts = [{ type: "created_request", request: row }];
-          } else if (pendingToolCall.toolName === "cancelReorderRequest") {
-            const input = cancelReorderRequestInput.parse(pendingToolCall.toolInput);
-            if (input.sessionId !== sessionId) {
-              throw new Error("Pending cancel request does not belong to this session.");
-            }
-            const row = await executeCancelReorderRequest(input.requestId, input.sessionId);
-            logAgentEvent("tool_approval_executed", {
-              sessionId,
-              toolName: pendingToolCall.toolName,
-              toolCallId: pendingToolCall.toolCallId,
-              requestId: row.requestId,
-            });
-            resultText = `Reorder request ${row.requestId} has been cancelled.`;
-            artifacts = [{ type: "cancelled_request", request: row }];
-          } else {
-            resultText = `Unknown tool: ${pendingToolCall.toolName}`;
-          }
+          const approvalResult = await executePendingApproval({
+            sessionId,
+            timezone,
+            pendingToolCall,
+          });
 
           const payload = createPayload({
-            text: resultText,
+            text: approvalResult.text,
             requiresApproval: false,
             pendingToolCall: null,
-            toolCallsMade: [pendingToolCall.toolName],
+            toolCallsMade: approvalResult.toolCallsMade,
             toolErrors: [],
-            artifacts,
+            artifacts: approvalResult.artifacts,
             updatedHistory: [
               ...history,
-              { role: "assistant", content: resultText },
+              { role: "assistant", content: approvalResult.text },
             ],
           });
 
-          await streamText(controller, resultText);
+          await streamText(controller, approvalResult.text);
           logAgentEvent("chat_request_completed", {
             requestId,
             sessionId,
             approve: true,
             durationMs: timer.elapsedMs(),
             requiresApproval: false,
-            toolCallsMade: [pendingToolCall.toolName],
+            toolCallsMade: approvalResult.toolCallsMade,
             toolErrors: [],
+            approvalReused: approvalResult.reused,
           });
           emitEvent(controller, { type: "complete", payload });
           controller.close();

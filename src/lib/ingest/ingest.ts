@@ -1,5 +1,8 @@
-import * as XLSX from "xlsx";
+import * as XLSXModule from "xlsx";
+import type { WorkBook } from "xlsx";
 import { getServiceClient } from "../db/client";
+
+const XLSX = (("default" in XLSXModule ? XLSXModule.default : XLSXModule) as typeof XLSXModule);
 
 // German → English order unit normalization
 const ORDER_UNIT_MAP: Record<string, string> = {
@@ -40,10 +43,13 @@ const REQUIRED_COLUMNS = [
   "Währung",
 ];
 
+const INGEST_BATCH_SIZE = 1000;
+
 function stripApostrophe(val: unknown): string | null {
   if (val == null) return null;
   const s = String(val).trim();
-  return s.startsWith("'") ? s.slice(1) : s;
+  const stripped = s.startsWith("'") ? s.slice(1) : s;
+  return stripped.length > 0 ? stripped : null;
 }
 
 function normalizeOrderUnit(raw: string): string {
@@ -56,8 +62,83 @@ function normalizeBaseUnit(raw: string): string {
   return BASE_UNIT_MAP[trimmed] ?? trimmed;
 }
 
+function parseRequiredString(value: unknown, field: string, rowNumber: number): string {
+  const parsed = String(value ?? "").trim();
+  if (parsed.length === 0) {
+    throw new Error(`Invalid value for "${field}" on row ${rowNumber}: expected a non-empty string`);
+  }
+  return parsed;
+}
+
+function parseRequiredInteger(
+  value: unknown,
+  field: string,
+  rowNumber: number,
+  options: { min?: number } = {}
+): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    throw new Error(`Invalid value for "${field}" on row ${rowNumber}: expected an integer`);
+  }
+  if (options.min != null && parsed < options.min) {
+    throw new Error(`Invalid value for "${field}" on row ${rowNumber}: expected >= ${options.min}`);
+  }
+  return parsed;
+}
+
+function parseOptionalInteger(
+  value: unknown,
+  field: string,
+  rowNumber: number,
+  options: { min?: number } = {}
+): number | null {
+  if (value == null || String(value).trim() === "") {
+    return null;
+  }
+  return parseRequiredInteger(value, field, rowNumber, options);
+}
+
+function parseOptionalDecimal(
+  value: unknown,
+  field: string,
+  rowNumber: number,
+  options: { min?: number } = {}
+): number | null {
+  if (value == null || String(value).trim() === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid value for "${field}" on row ${rowNumber}: expected a number`);
+  }
+  if (options.min != null && parsed < options.min) {
+    throw new Error(`Invalid value for "${field}" on row ${rowNumber}: expected >= ${options.min}`);
+  }
+  return parsed;
+}
+
+function parseOptionalTrimmedString(value: unknown): string | null {
+  if (value == null) {
+    return null;
+  }
+  const parsed = String(value).trim();
+  return parsed.length > 0 ? parsed : null;
+}
+
+export function chunkRecords<T>(records: T[], batchSize: number): T[][] {
+  if (batchSize <= 0) {
+    throw new Error("batchSize must be greater than zero");
+  }
+
+  const batches: T[][] = [];
+  for (let index = 0; index < records.length; index += batchSize) {
+    batches.push(records.slice(index, index + batchSize));
+  }
+  return batches;
+}
+
 export async function ingestExcel(filePath: string): Promise<void> {
-  let workbook: XLSX.WorkBook;
+  let workbook: WorkBook;
   try {
     workbook = XLSX.readFile(filePath);
   } catch {
@@ -80,36 +161,45 @@ export async function ingestExcel(filePath: string): Promise<void> {
     }
   }
 
-  const products = rows.map((row) => ({
-    internal_id: Number(row["internal_id"]),
-    description: String(row["Artikelbezeichnung"]).trim(),
-    brand: String(row["Marke"]).trim(),
-    supplier_article_no: row["Artikelnummer"]
-      ? String(row["Artikelnummer"]).trim()
-      : null,
-    annual_quantity: row["Jahresmenge"] != null
-      ? Math.round(Number(row["Jahresmenge"]))
-      : null,
-    order_unit: normalizeOrderUnit(String(row["Bestellmengeneinheit"])),
-    base_units_per_bme: Math.round(
-      Number(row["Basismengeneinheiten pro BME"])
-    ),
-    base_unit: normalizeBaseUnit(String(row["Basismengeneinheit"])),
-    gtin_ean: stripApostrophe(row["GTIN"]),
-    mdr_class: row["MDR-Klasse"] ? String(row["MDR-Klasse"]).trim() : null,
-    net_target_price:
-      row["Netto-Zielpreis"] != null
-        ? parseFloat(String(row["Netto-Zielpreis"]))
-        : null,
-    currency: String(row["Währung"]).trim(),
-  }));
+  const products = rows.map((row, index) => {
+    const rowNumber = index + 2;
+    return {
+      internal_id: parseRequiredInteger(row["internal_id"], "internal_id", rowNumber, { min: 1 }),
+      description: parseRequiredString(row["Artikelbezeichnung"], "Artikelbezeichnung", rowNumber),
+      brand: parseRequiredString(row["Marke"], "Marke", rowNumber),
+      supplier_article_no: parseOptionalTrimmedString(row["Artikelnummer"]),
+      annual_quantity: parseOptionalInteger(row["Jahresmenge"], "Jahresmenge", rowNumber, { min: 0 }),
+      order_unit: normalizeOrderUnit(
+        parseRequiredString(row["Bestellmengeneinheit"], "Bestellmengeneinheit", rowNumber)
+      ),
+      base_units_per_bme: parseRequiredInteger(
+        row["Basismengeneinheiten pro BME"],
+        "Basismengeneinheiten pro BME",
+        rowNumber,
+        { min: 1 }
+      ),
+      base_unit: normalizeBaseUnit(
+        parseRequiredString(row["Basismengeneinheit"], "Basismengeneinheit", rowNumber)
+      ),
+      gtin_ean: stripApostrophe(row["GTIN"]),
+      mdr_class: parseOptionalTrimmedString(row["MDR-Klasse"]),
+      net_target_price: parseOptionalDecimal(row["Netto-Zielpreis"], "Netto-Zielpreis", rowNumber, {
+        min: 0,
+      }),
+      currency: parseRequiredString(row["Währung"], "Währung", rowNumber),
+    };
+  });
 
   const db = getServiceClient();
-  const { error } = await db
-    .from("products")
-    .upsert(products, { onConflict: "internal_id" });
+  const batches = chunkRecords(products, INGEST_BATCH_SIZE);
 
-  if (error) {
-    throw new Error(`Supabase upsert failed: ${error.message}`);
+  for (const batch of batches) {
+    const { error } = await db
+      .from("products")
+      .upsert(batch, { onConflict: "internal_id" });
+
+    if (error) {
+      throw new Error(`Supabase upsert failed: ${error.message}`);
+    }
   }
 }

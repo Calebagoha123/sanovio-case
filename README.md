@@ -6,7 +6,7 @@ V1 of a chat-based procurement workspace for hospital reorder workflows. The app
 
 - Natural-language catalog search
 - Structured product details with unit hierarchy
-- Reorder request creation with approval gating
+- Single-item and basket reorder creation with approval gating
 - Session-scoped request listing and cancellation
 - Server-side quantity normalization and date resolution
 - Streaming chat responses with structured UI artifacts
@@ -14,7 +14,7 @@ V1 of a chat-based procurement workspace for hospital reorder workflows. The app
 ## Core Product Rules
 
 - Search can show multiple plausible matches.
-- A reorder request is always for one product at a time.
+- Basket requests can span multiple products when delivery metadata is shared.
 - Writes are never executed directly from model text.
 - Session identity is injected server-side.
 - Dates and quantity conversions are resolved deterministically in code.
@@ -61,7 +61,6 @@ src/
   lib/ingest/           catalog ingestion
 supabase/
   migrations/           schema
-design-docs/            design rationale and test plan
 ```
 
 ## Local Commands
@@ -70,6 +69,12 @@ design-docs/            design rationale and test plan
 pnpm dev
 pnpm build
 pnpm exec tsc --noEmit
+pnpm bench:orders
+pnpm bench:scale
+pnpm bench:scale:thresholds
+pnpm promptfoo:eval
+pnpm promptfoo:redteam
+pnpm promptfoo:redteam:local
 pnpm test:ci
 pnpm test:unit
 pnpm test:integration
@@ -90,6 +95,24 @@ pnpm test:e2e
 
 - `pnpm test:e2e`
   Real-model conversation tests. Requires local Supabase plus `ANTHROPIC_API_KEY`.
+
+- `pnpm bench:orders`
+  Local Vitest benchmark for grouped basket creation. Requires local Supabase and is intended to compare line-item preparation time against grouped insert time.
+
+- `pnpm bench:scale`
+  Runs the catalog scaling benchmark report against the selected dataset. Set `BENCH_DATASET` to `sample`, `100`, `1000`, or `100000`.
+
+- `pnpm bench:scale:thresholds`
+  Runs the same scaling benchmark but fails if the measured timings exceed the configured ceilings in [`src/lib/benchmarks/catalog-scaling-thresholds.ts`](/Users/calebagoha/Desktop/sanovio-case/src/lib/benchmarks/catalog-scaling-thresholds.ts).
+
+- `pnpm promptfoo:eval`
+  Compares prompt variants for the reorder agent using the workflow evals in [`promptfoo/reorder.promptfoo.yaml`](/Users/calebagoha/Desktop/sanovio-case/promptfoo/reorder.promptfoo.yaml). The script uses a temporary Node `22.22.0` wrapper because the local system Node is below promptfoo's supported runtime floor. Requires local Supabase plus `ANTHROPIC_API_KEY`.
+
+- `pnpm promptfoo:redteam`
+  Runs Promptfoo's hosted red-team workflow using [`promptfoo/reorder.redteam.yaml`](/Users/calebagoha/Desktop/sanovio-case/promptfoo/reorder.redteam.yaml). This is useful when hosted adversarial test generation is available.
+
+- `pnpm promptfoo:redteam:local`
+  Runs the local adversarial eval suite in [`promptfoo/reorder.adversarial.promptfoo.yaml`](/Users/calebagoha/Desktop/sanovio-case/promptfoo/reorder.adversarial.promptfoo.yaml). This covers approval bypass, prompt extraction, tool/schema discovery, cross-session access, ERP/stock scope escape, unauthorized cancellation, and SQL/data-dump attempts without depending on Promptfoo's hosted generation path.
 
 ## Environment
 
@@ -114,15 +137,6 @@ The repository is set up for a minimal GitHub Actions CI workflow:
 
 This keeps every push validated without depending on Docker, Supabase, or live model APIs.
 
-## Design Docs
-
-The detailed rationale is in:
-
-- [`design-docs/README.md`](/Users/calebagoha/Desktop/sanovio-case/design-docs/README.md)
-- [`design-docs/DESIGN.md`](/Users/calebagoha/Desktop/sanovio-case/design-docs/DESIGN.md)
-- [`design-docs/SEARCH.md`](/Users/calebagoha/Desktop/sanovio-case/design-docs/SEARCH.md)
-- [`design-docs/TEST_PLAN.md`](/Users/calebagoha/Desktop/sanovio-case/design-docs/TEST_PLAN.md)
-
 ## V1 Scope Boundaries
 
 V1 intentionally does not include:
@@ -131,7 +145,6 @@ V1 intentionally does not include:
 - auth / multi-user tenancy
 - inventory visibility
 - cross-session memory
-- basket orders spanning multiple products
 - production-grade scaling and benchmarking
 
 Those are the next-step topics for V2 and for the follow-up systems design discussion.

@@ -62,4 +62,14 @@ describe("executeCancelReorderRequest", () => {
       executeCancelReorderRequest(requestId, sessionId)
     ).rejects.toThrow(InvalidStatusTransitionError);
   });
+
+  it("throws RequestNotFoundError when cancelling a request from a different session", async () => {
+    const ownerSessionId = uuidv4();
+    const attackerSessionId = uuidv4();
+    const { requestId } = await createReorderRequest({ ...BASE, sessionId: ownerSessionId });
+
+    await expect(
+      executeCancelReorderRequest(requestId, attackerSessionId)
+    ).rejects.toThrow(RequestNotFoundError);
+  });
 });
